@@ -34,7 +34,8 @@ def line_text(line):
 
 
 def line_say(line):
-    return line if isinstance(line, str) else line.get("say", line["text"])
+    s = line if isinstance(line, str) else line.get("say", line["text"])
+    return s.replace("[", "").replace("]", "")
 
 
 def build_timeline(ep, durations):
@@ -57,19 +58,28 @@ def build_timeline(ep, durations):
         start = t
         rel = []
         tt = 0.35
+        gap = LINE_GAP
         for ln in sc["lines"]:
             d = durations[k]
-            rel.append((tt, tt + d, line_text(ln)))
-            lines.append((start + tt, start + tt + d, line_text(ln), k))
-            tt += d + LINE_GAP
+            meta = {} if isinstance(ln, str) else ln
+            tt += meta.get("pause_before", 0.0)
+            item = {"st": tt, "en": tt + d, "text": line_text(ln)}
+            for key in ("impact", "impact_dur", "accent", "q", "note"):
+                if key in meta:
+                    item[key] = meta[key]
+            rel.append(item)
+            lines.append((start + tt, start + tt + d, line_text(ln), k, item))
+            # 問いかけ（？で終わる行）のあとは少し長めに間をとる
+            gap = meta.get("pause_after", 0.8 if line_text(ln).rstrip().endswith(("？", "?")) else LINE_GAP)
+            tt += d + gap
             k += 1
-        dur = tt - LINE_GAP + SCENE_TAIL
+        dur = tt - gap + sc.get("tail", SCENE_TAIL)
         shots_def = sc.get("shots") or [{"from": 0, "visual": sc["visual"]}]
         shots = []
         for j, sh in enumerate(shots_def):
-            s0 = 0.0 if j == 0 else rel[sh["from"]][0] - 0.2
-            s1 = dur if j == len(shots_def) - 1 else rel[shots_def[j + 1]["from"]][0] - 0.2
-            at = {i: rel[i][0] - s0 for i in range(len(rel))}
+            s0 = 0.0 if j == 0 else rel[sh["from"]]["st"] - 0.2
+            s1 = dur if j == len(shots_def) - 1 else rel[shots_def[j + 1]["from"]]["st"] - 0.2
+            at = {i: rel[i]["st"] - s0 for i in range(len(rel))}
             shots.append({"start": s0, "end": s1, "at": at, "visual": sh["visual"]})
         clips.append({"kind": "scene", "id": sc["id"], "start": start, "dur": dur,
                       "lines": rel, "shots": shots})
@@ -129,8 +139,8 @@ def fmt_chapter(t):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("episode_dir")
-    ap.add_argument("--tts", choices=["openjtalk", "voicevox"], default="openjtalk")
-    ap.add_argument("--speaker", type=int, default=13, help="VOICEVOX の話者 ID (13 = 青山龍星)")
+    ap.add_argument("--tts", choices=["openjtalk", "voicevox"], help="episode.json の voice.engine を上書きする")
+    ap.add_argument("--speaker", type=int, help="VOICEVOX の話者 ID を上書きする")
     ap.add_argument("--still", help="指定したシーン id の静止画を数枚書き出して終了する (確認用)")
     ap.add_argument("--jobs", type=int, default=4)
     args = ap.parse_args()
@@ -140,13 +150,18 @@ def main():
     out = ROOT.parent / "build" / ep["id"]
     for d in ("clips", "tts", "stills"):
         (out / d).mkdir(parents=True, exist_ok=True)
-    speed = ep.get("voice", {}).get("speed", 1.0)
+    voice = dict(ep.get("voice", {}))
+    if args.tts:
+        voice["engine"] = args.tts
+    if args.speaker is not None:
+        voice["speaker"] = args.speaker
 
     # 1. ナレーション
     voices = []
     for sc in ep["scenes"]:
         for ln in sc["lines"]:
-            voices.append(audio.synthesize(line_say(ln), out / "tts", args.tts, speed, args.speaker))
+            cfg = dict(voice, **(ln.get("voice", {}) if isinstance(ln, dict) else {}))
+            voices.append(audio.synthesize(line_say(ln), out / "tts", cfg))
     durations = [len(v) / audio.SR for v in voices]
 
     # 2. タイムライン
@@ -163,8 +178,9 @@ def main():
         return
 
     # 3. 音声ミックス
-    voice_events = [(st, voices[k]) for st, _, _, k in lines]
+    voice_events = [(st, voices[k]) for st, _, _, k, _ in lines]
     sfx = [(c["start"] + 0.1, audio.whoosh(1.0)) for c in clips if c["kind"] == "card"]
+    sfx += [(st, audio.hit()) for st, _, _, _, item in lines if item.get("impact")]
     master = audio.mix(total, voice_events, sfx)
     audio.write_wav(master, out / "master.wav")
 
@@ -182,7 +198,8 @@ def main():
 
     # 5. 字幕・チャプター・概要欄・サムネイル
     (out / "captions.srt").write_text("\n".join(
-        f"{i + 1}\n{fmt_srt(st)} --> {fmt_srt(en)}\n{txt}\n" for i, (st, en, txt, _) in enumerate(lines)))
+        f"{i + 1}\n{fmt_srt(st)} --> {fmt_srt(en)}\n{txt.replace('[', '').replace(']', '')}\n"
+        for i, (st, en, txt, _, _) in enumerate(lines)))
     chapter_txt = "\n".join(f"{fmt_chapter(t)} {name}" for t, name in chapters)
     (out / "chapters.txt").write_text(chapter_txt + "\n")
     tmpl = ep_dir / "description.md"

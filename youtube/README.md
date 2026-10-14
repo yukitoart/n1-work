@@ -76,7 +76,15 @@ python3 pipeline/build.py episodes/001_saizeriya --tts voicevox --speaker 13   #
 フィルムグレイン、周辺減光、シネマ風の字幕がかかる。BGM（アンビエント）とチャプター切り替えの効果音も自動生成し、
 ナレーション中は BGM を自動で下げる（ダッキング）。音量は YouTube 基準の -14 LUFS に揃える。
 
+### テロップ
+
+視聴維持の設計とテロップの使い分けは `research/retention.md` を参照。
+
 ### 写真・映像素材を足すとき
+
+実写は `{"type": "footage", "path": "assets/footage/xxx.mp4", "fallback": {...}}` で入れる。
+動画・写真のどちらでもよく、映画風の色調補正とゆっくりしたズームが自動でかかる。素材が無いあいだは `fallback` の演出が入る。
+各回に必要な素材は `episodes/<id>/shotlist.md` にまとめる。
 
 `assets/` に画像を置いて `{"type": "image", "path": "assets/xxx.jpg", "text": "見出し"}` で使える。
 使ってよいのは **自分で撮った写真・商用利用可のストック素材（Pexels、Pixabay など）・自分で生成した AI 画像** だけ。
@@ -106,10 +114,10 @@ YouTube は AI の利用そのものではなく、「テンプレートで量�
 
 ## 本番化のためのアップグレード（優先度順）
 
-1. **ナレーションを VOICEVOX に変更**（無料）。`--tts voicevox --speaker 13` で切り替わる。
-   クラウド環境ではネットワーク制限で VOICEVOX を入れられないため、
-   ① 自分の PC で VOICEVOX を起動して build.py を実行する か、
-   ② 環境のネットワーク設定で `github.com` のリリース取得を許可して、こちらでエンジンを導入する。
-   いまの Open JTalk は機械的なので、仮ナレーション専用。
+1. **ナレーション**：VOICEVOX エンジン（`http://127.0.0.1:50021`）を使う。声は episode.json の `voice` で設定
+   （`speaker` 話者ID、`speed` 速さ、`pitch` 高さ、`intonation` 抑揚、`pause` 読点の間）。
+   行ごとに `"voice": {...}` で上書きでき、`？` で終わる行のあとは自動で間を長めにとる。
+   エンジンの導入：GitHub の voicevox_engine リリース（linux-cpu-x64）を展開して `./run` を起動する。
+   概要欄に「VOICEVOX:キャラクター名」のクレジットが必要。
 2. **実写・イメージ素材**：ストック素材や AI 生成画像を `image` ショットで差し込む
 3. **BGM**：自動生成の BGM を、YouTube オーディオライブラリの曲に差し替えるとさらに良くなる

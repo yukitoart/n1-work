@@ -16,23 +16,30 @@ SR = 48000
 
 # ---------------------------------------------------------------- ナレーション
 
-def tts_openjtalk(text, speed):
+def tts_openjtalk(text, cfg):
     import pyopenjtalk
 
-    x, sr = pyopenjtalk.tts(text, speed=speed)
+    x, sr = pyopenjtalk.tts(text, speed=cfg.get("speed", 1.0))
     assert sr == SR, sr
     return (x / 32768.0).astype(np.float32)
 
 
-def tts_voicevox(text, speed, speaker):
+def tts_voicevox(text, cfg):
+    """VOICEVOX エンジン。cfg: speaker / speed / pitch / intonation / volume / pause"""
     base = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021")
+    speaker = cfg.get("speaker", 13)
     q = urllib.parse.urlencode({"text": text, "speaker": speaker})
     query = json.loads(urllib.request.urlopen(
         urllib.request.Request(f"{base}/audio_query?{q}", method="POST")).read())
-    query["speedScale"] = speed
+    query["speedScale"] = cfg.get("speed", 1.0)
+    query["pitchScale"] = cfg.get("pitch", 0.0)
+    query["intonationScale"] = cfg.get("intonation", 1.0)
+    query["volumeScale"] = cfg.get("volume", 1.0)
     query["outputSamplingRate"] = SR
     query["prePhonemeLength"] = 0.05
     query["postPhonemeLength"] = 0.05
+    if "pause" in cfg:  # 読点などの間の長さ (エンジン 0.19 以降)
+        query["pauseLengthScale"] = cfg["pause"]
     data = urllib.request.urlopen(urllib.request.Request(
         f"{base}/synthesis?speaker={speaker}", data=json.dumps(query).encode(),
         headers={"Content-Type": "application/json"}, method="POST")).read()
@@ -47,16 +54,16 @@ def read_wav_bytes(data):
     return (pcm / 32768.0).astype(np.float32)
 
 
-def synthesize(text, cache_dir, backend="openjtalk", speed=1.0, speaker=13):
+def synthesize(text, cache_dir, cfg):
     """1 行ぶんの音声 (float32, 48kHz)。同じ条件の音声はキャッシュを再利用する。"""
-    key = hashlib.sha1(json.dumps([backend, speaker, speed, text]).encode()).hexdigest()[:16]
+    key = hashlib.sha1(json.dumps([cfg, text], sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
     path = Path(cache_dir) / f"{key}.npy"
     if path.exists():
         return np.load(path)
-    if backend == "voicevox":
-        x = tts_voicevox(text, speed, speaker)
+    if cfg.get("engine") == "voicevox":
+        x = tts_voicevox(text, cfg)
     else:
-        x = tts_openjtalk(text, speed)
+        x = tts_openjtalk(text, cfg)
     peak = float(np.max(np.abs(x))) or 1.0
     x = (x / peak * 0.9).astype(np.float32)
     np.save(path, x)
@@ -132,6 +139,16 @@ def whoosh(seconds=1.0):
             acc += k * (blk[j] - acc)
             out[i + j] = acc
     return out * env * 0.5
+
+
+def hit(seconds=0.7):
+    """強調テロップ用の低い「ドン」。"""
+    n = int(seconds * SR)
+    t = np.arange(n) / SR
+    f = 45 + 90 * np.exp(-t * 18)
+    body = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 6)
+    click = np.random.default_rng(3).standard_normal(n) * np.exp(-t * 120) * 0.25
+    return ((body + click) * 0.8).astype(np.float32)
 
 
 # ---------------------------------------------------------------- ミックス

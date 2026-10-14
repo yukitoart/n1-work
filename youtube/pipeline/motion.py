@@ -8,6 +8,7 @@ import json
 import math
 import random
 import re
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -229,42 +230,132 @@ def draw_finish(c, frame_idx):
     c.drawImageRect(g, skia.Rect(0, 0, W, H), skia.SamplingOptions())
 
 
-def wrap_caption(s, f, max_w):
-    no_start = set("、。，．・：；？！）」』】ー〜ぁぃぅぇぉっゃゅょァィゥェォッャュョ%％")
-    lines, cur = [], ""
-    for ch in s:
-        if text_width(cur + ch, f) <= max_w:
-            cur += ch
+# ---------------------------------------------------------------- テロップ
+
+HL = "#FFD54A"  # 字幕の強調色
+NO_LINE_START = set("、。，．・：；？！）」』】ー〜ぁぃぅぇぉっゃゅょァィゥェォッャュョ%％")
+
+
+def caption_chars(s):
+    """[ ] で囲んだ部分を強調として、(文字, 強調か) の列にする。"""
+    out = []
+    for seg, hl in rich_segments(s):
+        out += [(ch, hl) for ch in seg]
+    return out
+
+
+def wrap_chars(chars, f, max_w):
+    lines, cur = [], []
+    for item in chars:
+        if text_width("".join(ch for ch, _ in cur) + item[0], f) <= max_w:
+            cur.append(item)
             continue
-        if ch in no_start and cur:
+        if item[0] in NO_LINE_START and cur:
             lines.append(cur[:-1])
-            cur = cur[-1] + ch
+            cur = [cur[-1], item]
         else:
             lines.append(cur)
-            cur = ch
+            cur = [item]
     if cur:
         lines.append(cur)
     return lines
 
 
-def draw_caption(c, s, a=1.0):
+def char_runs(line):
+    runs = []
+    for ch, hl in line:
+        if runs and runs[-1][1] == hl:
+            runs[-1][0] += ch
+        else:
+            runs.append([ch, hl])
+    return runs
+
+
+def draw_caption(c, s, tl, a=1.0):
+    """下部の字幕。[ ] の部分は黄色＋マーカー。行の頭でふわっと出る。"""
     if not s:
         return
-    for size in (46, 42, 38):
+    chars = caption_chars(s)
+    for size in (48, 44, 40):
         f = font(size, bold=True)
-        lines = wrap_caption(s, f, 1560)
+        lines = wrap_chars(chars, f, 1600)
         if len(lines) <= 2:
             break
+    p = ease_out(tl / 0.25)
     lh = size * 1.5
-    y0 = H - 70 - lh * (len(lines) - 1)
-    sh = skia.GradientShader.MakeLinear([(0, H - 260), (0, H)], [C("#000000", 0), C("#000000", 0.55)])
-    c.drawRect(skia.Rect(0, H - 260, W, H), skia.Paint(Shader=sh))
+    y0 = H - 78 - lh * (len(lines) - 1) + 12 * (1 - p)
+    sh = skia.GradientShader.MakeLinear([(0, H - 300), (0, H)], [C("#000000", 0), C("#000000", 0.6)])
+    c.drawRect(skia.Rect(0, H - 300, W, H), skia.Paint(Shader=sh))
     for i, ln in enumerate(lines):
-        y = y0 + i * lh
-        x = W / 2 - text_width(ln, f) / 2
-        base = y + size * 0.36
-        c.drawString(ln, x, base, f, stroke("#000000", 8, 0.85 * a))
-        c.drawString(ln, x, base, f, fill("#FFFFFF", a))
+        x = W / 2 - text_width("".join(ch for ch, _ in ln), f) / 2
+        base = y0 + i * lh + size * 0.36
+        for seg, hl in char_runs(ln):
+            sw = text_width(seg, f)
+            if hl:
+                c.drawRect(skia.Rect.MakeXYWH(x - 3, base + 4, (sw + 6) * ease_out((tl - 0.15) / 0.35), 12),
+                           fill(HL, 0.45 * a * p))
+            c.drawString(seg, x, base, f, stroke("#000000", 9, 0.9 * a * p))
+            c.drawString(seg, x, base, f, fill(HL if hl else "#FFFFFF", a * p))
+            x += sw
+    return y0
+
+
+def draw_note(c, s, y, tl):
+    """字幕の上に小さく出す注記（※報道ベース など）。"""
+    p = ease_out(tl / 0.4)
+    f = font(26, True)
+    w = text_width(s, f) + 36
+    c.drawRRect(rrect(W / 2 - w / 2, y - 22, w, 44, 22), fill("#0B0F14", 0.7 * p))
+    draw_text(c, s, W / 2, y, f, MUTED, p, align="center", shadow=False)
+
+
+def draw_impact(c, text, tl, dur, accent=GOLD):
+    """画面中央にドンと出る強調テロップ（パターンインタラプト用）。"""
+    if tl < 0 or tl > dur:
+        return
+    pin = ease_out(tl / 0.35)
+    a = clamp((dur - tl) / 0.3)
+    if tl < 0.12:
+        c.drawRect(skia.Rect(0, 0, W, H), fill("#FFFFFF", 0.12 * (1 - tl / 0.12)))
+    sc = 1.0 + 0.22 * (1 - pin)
+    f = font(112, True)
+    lines = text.split("\n")
+    bw = max(rich_width(ln, f) for ln in lines) + 140
+    lh = 150
+    bh = lh * len(lines) + 40
+    c.save()
+    c.translate(W / 2, H * 0.44)
+    c.rotate(-2.5)
+    c.scale(sc, sc)
+    band = skia.Path()
+    k = 36
+    band.moveTo(-bw / 2 + k, -bh / 2)
+    band.lineTo(bw / 2 + k, -bh / 2)
+    band.lineTo(bw / 2 - k, bh / 2)
+    band.lineTo(-bw / 2 - k, bh / 2)
+    band.close()
+    c.save()
+    c.translate(0, 14)
+    c.drawPath(band, blur(fill("#000000", 0.6 * a * pin), 22))
+    c.restore()
+    c.drawPath(band, fill("#0B0F14", 0.92 * a * pin))
+    c.drawRect(skia.Rect.MakeXYWH(-bw / 2 - k - 4, bh / 2 - 12, (bw + 8) * pin, 12), fill(accent, a))
+    for i, ln in enumerate(lines):
+        y = -bh / 2 + 20 + lh / 2 + i * lh
+        draw_rich(c, ln, 0, y, f, "#FFFFFF", accent, a * pin)
+    c.restore()
+
+
+def draw_question(c, text, tl):
+    """左上に出しっぱなしにする「いまの問い」。"""
+    p = ease_out(tl / 0.45)
+    f = font(36, True)
+    w = text_width(text, f) + 120
+    x, y = 60 - 30 * (1 - p), 62
+    c.drawRRect(rrect(x, y - 32, w, 64, 12), fill("#0B0F14", 0.8 * p))
+    c.drawRect(skia.Rect.MakeXYWH(x, y - 32, 8, 64), fill(GOLD, p))
+    draw_text(c, "Q.", x + 46, y, font(36, True), GOLD, p, align="center", shadow=False)
+    draw_text(c, text, x + 82, y, f, TEXT, p, shadow=False)
 
 
 # ---------------------------------------------------------------- 共通パーツ
@@ -804,18 +895,93 @@ def draw_chapter(c, t, v, ctx):
     draw_text(c, v["title"], W / 2, 680 + 20 * (1 - pt), font(76, True), TEXT, pt, align="center")
 
 
-def draw_image(c, t, v, ctx):
-    """素材画像 (ストック写真・AI生成画像など) をケン・バーンズ効果で表示する。"""
-    img = image_cache(str(ROOT.parent / v["path"]))
-    s = 1.05 + 0.08 * clamp(t / max(ctx["dur"], 0.1))
+class VideoReader:
+    """ffmpeg で動画素材を 1920x1080・30fps に変換しながら 1 フレームずつ読む。"""
+
+    def __init__(self, path):
+        self.path = path
+        self.proc = None
+        self.idx = -1
+        self.length = None
+        self.img = None
+
+    def _open(self):
+        if self.proc:
+            self.proc.kill()
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "error", "-i", self.path, "-an", "-vf",
+             f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS}",
+             "-f", "rawvideo", "-pix_fmt", "rgba", "-"], stdout=subprocess.PIPE)
+        self.idx = -1
+
+    def get(self, i):
+        if self.length:
+            i %= self.length
+        if self.proc is None or i < self.idx:
+            self._open()
+        while self.idx < i:
+            buf = self.proc.stdout.read(W * H * 4)
+            if len(buf) < W * H * 4:
+                self.length = max(1, self.idx + 1)
+                i %= self.length
+                self._open()
+                continue
+            self.idx += 1
+            if self.idx == i:
+                arr = np.frombuffer(buf, dtype=np.uint8).reshape(H, W, 4)
+                self.img = skia.Image.fromarray(arr, colorType=skia.kRGBA_8888_ColorType)
+        return self.img
+
+
+_READERS = {}
+
+
+def asset_path(rel):
+    p = ROOT.parent / rel
+    return p if p.exists() else None
+
+
+def draw_footage(c, t, v, ctx):
+    """実写素材（動画・写真）。素材ファイルが無いときは fallback の演出を描く。"""
+    path = asset_path(v["path"])
+    if path is None:
+        fb = v.get("fallback")
+        if fb:
+            RENDERERS[fb["type"]](c, t, fb, ctx)
+        else:
+            draw_text(c, f"[素材待ち] {v['path']}", W / 2, H / 2, font(40, True), MUTED, align="center")
+        return
+    if path.suffix.lower() in (".mp4", ".mov", ".webm", ".mkv"):
+        key = (str(path), ctx.get("key"))
+        if key not in _READERS:
+            _READERS[key] = VideoReader(str(path))
+        img = _READERS[key].get(int((t + v.get("offset", 0)) * FPS))
+    else:
+        img = image_cache(str(path))
+    s = 1.02 + 0.06 * clamp(t / max(ctx["dur"], 0.1))
     iw, ih = img.width(), img.height()
     k = max(W / iw, H / ih) * s
-    dx = (W - iw * k) / 2 + v.get("pan", 0) * t
-    c.drawImageRect(img, skia.Rect.MakeXYWH(dx, (H - ih * k) / 2, iw * k, ih * k),
+    c.drawImageRect(img, skia.Rect.MakeXYWH((W - iw * k) / 2 + v.get("pan", 0) * t, (H - ih * k) / 2, iw * k, ih * k),
                     skia.SamplingOptions(skia.FilterMode.kLinear))
-    c.drawRect(skia.Rect(0, 0, W, H), fill("#000000", v.get("dim", 0.35)))
+    # シネマ風のカラーグレーディング（暗部をティール、明部をオレンジ寄りに）
+    c.drawRect(skia.Rect(0, 0, W, H), fill("#000000", v.get("dim", 0.3)))
+    sh = skia.GradientShader.MakeLinear([(0, 0), (W, H)], [C("#0E4A55", 0.22), C("#0E4A55", 0.0), C("#C86A2A", 0.16)],
+                                        [0, 0.5, 1])
+    c.drawRect(skia.Rect(0, 0, W, H), skia.Paint(Shader=sh))
+    lt = v.get("lower_third")
+    if lt:
+        p = prog(t, 0.4, 0.7)
+        x, y = 120 - 40 * (1 - p), H - 330
+        c.drawRect(skia.Rect.MakeXYWH(x, y - 40, 8, 110), fill(GOLD, p))
+        draw_text(c, lt["title"], x + 34, y, font(56, True), TEXT, p)
+        if lt.get("sub"):
+            draw_text(c, lt["sub"], x + 34, y + 54, font(30), MUTED, p)
     if v.get("text"):
         draw_rich(c, v["text"], W / 2, H / 2, font(96, True), TEXT, GOLD, prog(t, 0.3, 0.8))
+
+
+def draw_image(c, t, v, ctx):
+    draw_footage(c, t, v, ctx)
 
 
 @lru_cache(maxsize=16)
@@ -823,12 +989,24 @@ def image_cache(path):
     return skia.Image.open(path)
 
 
+def draw_endscreen(c, t, v, ctx):
+    """終了画面。YouTube の終了画面要素（動画・登録ボタン）を置く場所を空けておく。"""
+    p = prog(t, 0.0, 0.8)
+    draw_text(c, v.get("title", ""), W / 2, 170, font(64, True), TEXT, p, align="center")
+    draw_text(c, v.get("sub", ""), W / 2, 250, font(34), MUTED, p, align="center")
+    # 左: おすすめ動画の枠 (16:9)、右: チャンネル登録の丸
+    c.drawRRect(rrect(260, 380, 800, 450, 24), stroke(GOLD, 4, 0.8 * p))
+    draw_text(c, v.get("next", "次の動画"), 660, 605, font(44, True), MUTED, 0.6 * p, align="center")
+    c.drawCircle(1440, 605, 190, stroke(GOLD, 4, 0.8 * p))
+    draw_text(c, "チャンネル登録", 1440, 605, font(40, True), MUTED, 0.6 * p, align="center")
+
+
 RENDERERS = {
     "title": draw_title, "headline": draw_headline, "doria": draw_doria, "ring": draw_ring,
     "year": draw_year, "pricedrop": draw_pricedrop, "stats": draw_stats, "bars": draw_bars,
     "map": draw_map, "flow": draw_flow, "checklist": draw_checklist, "formula": draw_formula,
     "linechart": draw_linechart, "timeline": draw_timeline, "bignum": draw_bignum,
-    "chapter": draw_chapter, "image": draw_image,
+    "chapter": draw_chapter, "image": draw_image, "footage": draw_footage, "endscreen": draw_endscreen,
 }
 
 
@@ -839,7 +1017,7 @@ EDGE_FADE = 0.3
 
 
 def draw_clip_frame(c, clip, t, tg, frame_idx, captions):
-    """clip: {'dur', 'shots': [{'start','end','visual'}], 'lines': [(start,end,text)]} (時刻はクリップ基準)。"""
+    """clip: {'dur', 'shots': [{'start','end','at','visual'}], 'lines': [{'st','en','text',...}]} (時刻はクリップ基準)。"""
     draw_background(c, tg)
     shots = clip["shots"]
     idx = 0
@@ -863,15 +1041,27 @@ def draw_clip_frame(c, clip, t, tg, frame_idx, captions):
         c.scale(zoom, zoom)
         c.translate(-W / 2, -H / 2)
         at = s["at"]
-        ctx = {"dur": dur, "at": (lambda j, at=at: at.get(j, 0.0))}
+        ctx = {"dur": dur, "key": (clip.get("id"), i), "at": (lambda j, at=at: at.get(j, 0.0))}
         RENDERERS[s["visual"]["type"]](c, ts, s["visual"], ctx)
         c.restore()
     if captions:
-        cap = None
-        for st, en, txt in clip["lines"]:
-            if t >= st:
-                cap = txt
-        draw_caption(c, cap)
+        cur = None
+        question = None
+        for ln in clip["lines"]:
+            if t >= ln["st"]:
+                cur = ln
+                if ln.get("q"):
+                    question = ln
+        for ln in clip["lines"]:
+            if ln.get("impact"):
+                draw_impact(c, ln["impact"], t - ln["st"], ln.get("impact_dur", 2.2),
+                            ACCENTS.get(ln.get("accent", "gold"), GOLD))
+        if question:
+            draw_question(c, question["q"], t - question["st"])
+        if cur:
+            y0 = draw_caption(c, cur["text"], t - cur["st"])
+            if cur.get("note") and y0:
+                draw_note(c, cur["note"], y0 - 70, t - cur["st"])
     draw_finish(c, frame_idx)
     edge = min(1.0, t / EDGE_FADE, (clip["dur"] - t) / EDGE_FADE)
     if edge < 1.0:
