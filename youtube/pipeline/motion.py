@@ -149,7 +149,10 @@ def icon_image(name, size, color):
     svg = (ROOT / "vendor" / "icons" / "filled" / f"{name}.svg").read_text()
     svg = svg.replace('width="24" height="24"', f'width="{size}" height="{size}"')
     svg = svg.replace("<path ", f'<path fill="{color}" ')
-    dom = skia.SVGDOM.MakeFromStream(skia.MemoryStream(svg.encode()))
+    data = svg.encode()
+    dom = skia.SVGDOM.MakeFromStream(skia.MemoryStream(data, True))  # True = データをコピーして保持
+    if dom is None:
+        raise RuntimeError(f"icon {name} を読み込めません")
     dom.setContainerSize(skia.Size(size, size))
     surf = skia.Surface(size, size)
     with surf as cv:
