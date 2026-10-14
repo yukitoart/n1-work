@@ -1,2 +1,4 @@
 build/
 pipeline/fonts/
+pipeline/vendor/
+__pycache__/
